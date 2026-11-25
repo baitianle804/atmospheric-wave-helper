@@ -56,6 +56,13 @@ canvas:active {cursor:grabbing}
 .viewer-foot strong {color:var(--accent);font-weight:650}
 .controls .bar {justify-content:flex-start}
 .settings {padding:17px 19px 18px}
+.display-mode {padding:0;margin:0 0 17px;border:0;min-width:0}
+.display-mode legend {font-size:15px;font-weight:680;margin-bottom:7px;padding:0}
+.mode-options {display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.mode-options input {position:absolute;width:1px;height:1px;opacity:0}
+.mode-options label {text-align:center;cursor:pointer}
+.mode-options input:checked + label {border-color:var(--accent);background:var(--soft);color:var(--accent)}
+.mode-options input:focus-visible + label {outline:2px solid var(--accent);outline-offset:3px}
 .field + .field {margin-top:18px}
 .label-row {display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
 .label-row label {font-size:15px;font-weight:680}
@@ -98,13 +105,23 @@ input[type=range] {width:100%;margin:0;display:block;cursor:pointer;accent-color
       </div></div>
       <div class="stage" id="stage">
         <canvas id="view" tabindex="0" aria-label="可旋转的三维均匀流场" aria-describedby="view-help">请使用支持 Canvas 的浏览器查看流场。</canvas>
-        <div class="stage-key"><i></i>速度矢量</div>
+        <div class="stage-key"><i aria-hidden="true"></i><span id="flow-legend">逐点风矢量</span></div>
       </div>
       <div class="viewer-foot" id="view-help"><span>拖动旋转 · 滚轮缩放 · 方向键旋转</span><strong>x 向东 · y 向北 · z 向上</strong></div>
     </section>
     <aside class="card controls" aria-labelledby="control-title">
       <div class="bar"><h2 id="control-title">流场设置</h2></div>
       <div class="settings">
+        <fieldset class="display-mode">
+          <legend>风场显示</legend>
+          <div class="mode-options">
+            <input type="radio" id="show-vectors" name="flow-display" value="vectors" checked>
+            <label class="btn" for="show-vectors">逐点风箭头</label>
+            <input type="radio" id="show-mean" name="flow-display" value="mean" aria-describedby="mean-note">
+            <label class="btn" for="show-mean">平均风场</label>
+          </div>
+          <p class="hint" id="mean-note" hidden>均匀流场中，空间平均风等于每一点的风。长箭头贯穿长方体，风速请看数值。</p>
+        </fieldset>
         <div class="field">
           <div class="label-row"><label for="speed">流速</label><div class="numeric"><input id="speed-number" type="number" min="0" max="50" step="0.1" value="12" aria-label="流速数值，米每秒"><span>m/s</span></div></div>
           <input id="speed" type="range" min="0" max="50" step="0.1" value="12">
@@ -143,11 +160,14 @@ const stage = document.querySelector('#stage');
 const play = document.querySelector('#play');
 const presets = [...document.querySelectorAll('[data-direction]')];
 const themeButtons = [...document.querySelectorAll('[data-theme-choice]')];
+const modeInputs = [...document.querySelectorAll('[name="flow-display"]')];
+const flowLegend = document.getElementById('flow-legend');
+const meanNote = document.getElementById('mean-note');
 const defaultView = { yaw: -0.59, tilt: 0.53, zoom: 1 };
 const camera = {...defaultView};
 const bounds = [4.2, 2.65, 1.5];
 const radians = Math.PI / 180;
-const state = {speed: 12, direction: 270, elevation: 0, running: !matchMedia('(prefers-reduced-motion: reduce)').matches};
+const state = {speed: 12, direction: 270, elevation: 0, display: 'vectors', running: !matchMedia('(prefers-reduced-motion: reduce)').matches};
 let velocity, unit, palette, width, height, drag, previousTime, animation;
 let travel = [0, 0, 0];
 
@@ -214,6 +234,18 @@ for (const name of ['speed', 'direction', 'elevation']) {
   input.addEventListener('change', () => setParameter(name, input.value === '' ? state[name] : +input.value));
 }
 for (const button of presets) button.addEventListener('click', () => setParameter('direction',+button.dataset.direction));
+function setDisplayMode(mode) {
+  state.display = mode;
+  const showMean = mode === 'mean';
+  flowLegend.textContent = showMean ? '空间平均风矢量' : '逐点风矢量';
+  meanNote.hidden = !showMean;
+  draw();
+}
+for (const input of modeInputs) {
+  input.addEventListener('change', () => {
+    if (input.checked) setDisplayMode(input.value);
+  });
+}
 
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
@@ -298,12 +330,14 @@ function draw() {
   for (const [a,b] of edges) line(points[a],points[b],palette.far,1);
   ctx.globalAlpha = 1;
   if (state.speed > 0) {
-    const arrowLength = .25 + 1.23*Math.sqrt(state.speed/50);
-    for (const center of lattice) {
-      const start = project(center.map((coord,i) => coord-unit[i]*arrowLength/2));
-      const end = project(center.map((coord,i) => coord+unit[i]*arrowLength/2));
-      ctx.globalAlpha = .54 + .37*clamp((start[2]+6)/12,0,1);
-      arrow(start,end,palette.flow,1.55,7);
+    if (state.display === 'vectors') {
+      const arrowLength = .25 + 1.23*Math.sqrt(state.speed/50);
+      for (const center of lattice) {
+        const start = project(center.map((coord,i) => coord-unit[i]*arrowLength/2));
+        const end = project(center.map((coord,i) => coord+unit[i]*arrowLength/2));
+        ctx.globalAlpha = .54 + .37*clamp((start[2]+6)/12,0,1);
+        arrow(start,end,palette.flow,1.55,7);
+      }
     }
     for (const [index, seed] of particles.entries()) {
       const point = seed.map((position,i) => wrap(position+travel[i],bounds[i]));
@@ -316,6 +350,14 @@ function draw() {
     }
   }
   ctx.globalAlpha = 1;
+  if (state.display === 'mean' && state.speed > 0) {
+    // For a uniform field the spatial mean equals the velocity at every point.
+    // Keep both ends just inside the first pair of faces the centerline meets.
+    const halfLength = .94 * Math.min(...bounds.map((radius,i) => radius/Math.abs(unit[i])));
+    const start = project(unit.map(component => -component*halfLength));
+    const end = project(unit.map(component => component*halfLength));
+    arrow(start,end,palette.flow,4,16);
+  }
   for (const [a,b] of edges) {
     if (!farEdges.has(a*8+b)) line(points[a],points[b],palette.frame,1.45);
   }
@@ -409,6 +451,7 @@ play.addEventListener('click', () => {
 
 setTheme('light');
 updateFlow();
+setDisplayMode(modeInputs.find(input => input.checked).value);
 new ResizeObserver(resize).observe(stage);
 resize();
 applyPlayback();
