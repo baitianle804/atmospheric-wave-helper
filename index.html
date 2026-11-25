@@ -72,6 +72,19 @@ canvas:active {cursor:grabbing}
 .viewer .bar {flex-wrap:wrap}
 .viewer .actions {flex-wrap:wrap}
 .tracking {padding:13px 19px;border-top:1px solid var(--line);font-size:14px}
+.physical {padding:16px 19px;border-bottom:1px solid var(--line)}
+.physical[hidden] {display:none}
+.physical .reference-select {width:auto;max-width:100%;min-width:155px}
+.physical-controls {display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.physical-controls label {font-size:14px}
+.physical-canvas {position:relative;margin-top:10px;height:clamp(235px,34vw,350px);border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--page)}
+.physical-canvas canvas {cursor:crosshair;touch-action:pan-y}
+.physical-key {display:flex;align-items:center;flex-wrap:wrap;gap:5px 12px;margin-top:8px;font-size:13px;color:var(--muted)}
+.physical-gradient {width:88px;height:9px;border-radius:6px;background:linear-gradient(90deg,#2872b0,var(--page),#d55827)}
+.probe-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:6px;margin:8px 0;font-size:13px}
+.probe-grid div {background:var(--page);border-radius:8px;padding:5px 8px}
+.probe-grid strong,.probe-grid output {display:block}
+.probe-meta {font-size:14px;color:var(--muted);margin-top:10px}
 .tracking-head {display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
 .tracking-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px}
 .tracking-grid div {background:var(--page);border-radius:8px;padding:7px 9px}
@@ -133,6 +146,38 @@ input[type=range] {width:100%;margin:0;display:block;cursor:pointer;accent-color
         <button class="btn" type="button" id="step">前进 2 秒</button>
         <button class="btn primary" type="button" id="play">暂停</button>
       </div></div>
+      <section class="physical" id="physical-panel" aria-labelledby="physical-heading" hidden>
+        <div class="tracking-head">
+          <h2 id="physical-heading">重力内波物理剖面</h2>
+          <div class="physical-controls">
+            <label for="physical-variable">填色变量</label>
+            <select class="reference-select" id="physical-variable">
+              <option value="buoyancy">浮力 b′</option>
+              <option value="theta">位温扰动 θ′</option>
+              <option value="pressure">气压扰动 p′</option>
+              <option value="verticalPressure">垂直气压梯度力</option>
+              <option value="acceleration">净垂直加速度</option>
+              <option value="w">垂直速度 w′</option>
+              <option value="divergence">水平辐合辐散</option>
+            </select>
+          </div>
+        </div>
+        <div class="physical-canvas"><canvas id="physics-view" tabindex="0" aria-label="物理剖面，可用方向键移动探针"></canvas></div>
+        <div class="physical-key">
+          <span id="physical-negative"></span><span class="physical-gradient" aria-hidden="true"></span><span id="physical-positive"></span>
+          <span>箭头为扰动速度，长度放大</span>
+        </div>
+        <p class="probe-meta">点击剖面取样 · <output id="probe-coordinates"></output></p>
+        <div class="probe-grid">
+          <div><strong>浮力 b′（m/s²）</strong><output data-probe="buoyancy"></output></div>
+          <div><strong>垂直气压梯度力（m/s²）</strong><output data-probe="verticalPressure"></output></div>
+          <div><strong>净垂直加速度（m/s²）</strong><output data-probe="acceleration"></output></div>
+          <div><strong>扰动速度 u′ / w′（m/s）</strong><output data-probe="velocity"></output></div>
+          <div><strong>水平散度 ∂u′/∂x（s⁻¹）</strong><output data-probe="divergence"></output></div>
+          <div><strong>位温 / 气压扰动（K / Pa）</strong><output data-probe="thermodynamic"></output></div>
+        </div>
+        <p class="hint">先读浮力与气压梯度力，再单步观察垂直速度和辐合辐散。散度为负表示辐合，为正表示辐散。</p>
+      </section>
       <div class="stage" id="stage">
         <canvas id="view" tabindex="0" aria-label="可旋转的三维球串与波峰" aria-describedby="view-help">请使用支持 Canvas 的浏览器查看流场。</canvas>
         <div class="stage-key" id="flow-key" data-mode="rows"><i aria-hidden="true"></i><span id="flow-legend">示踪球串</span></div>
@@ -452,6 +497,7 @@ function setDisplayMode(mode) {
   flowLegend.textContent = displayLabels[mode];
   meanNote.hidden = mode !== 'mean';
   tracking.hidden = !wave.enabled || mode !== 'rows';
+  physicalPanel.hidden = !physics.model?.local || mode !== 'rows';
   applyPlayback();
   draw();
 }
@@ -542,15 +588,17 @@ function makeLocalModes(scale, buoyancyFrequency) {
   }
   return {modes, normalization:centre, lid};
 }
-function localField(elapsed, centreX) {
+function localField(elapsed, centreX, diagnostics=false) {
   const {model,amplitude,localModes} = physics;
   const {modes,normalization,lid} = localModes;
   const frameModes = modes.map(({k,vertical}) => ({
     k, vertical:vertical.map(({m,weight,frequency}) => ({
-      m, coefficient:weight*Math.cos(frequency*elapsed)
+      m, frequency, coefficient:weight*Math.cos(frequency*elapsed),
+      derivative:diagnostics ? -weight*frequency*Math.sin(frequency*elapsed) : 0
     }))
   }));
   const layers = new Map();
+  const xPhases = new Map();
   const factor = amplitude/(normalization*model.scale);
   return (x,z) => {
     let layer = layers.get(z);
@@ -558,25 +606,56 @@ function localField(elapsed, centreX) {
       const weights = frameModes.map(({k,vertical}) => {
         let horizontal = 0;
         let verticalDisplacement = 0;
-        for (const {m,coefficient} of vertical) {
+        let u = 0, w = 0, acceleration = 0, pressure = 0;
+        for (const {m,coefficient,derivative,frequency} of vertical) {
           const angle = m*(z*model.scale+lid);
-          horizontal -= m/k*coefficient*Math.cos(angle);
-          verticalDisplacement += coefficient*Math.sin(angle);
+          const cosZ = Math.cos(angle), sinZ = Math.sin(angle);
+          horizontal -= m/k*coefficient*cosZ;
+          verticalDisplacement += coefficient*sinZ;
+          if (diagnostics) {
+            u -= m/k*derivative*cosZ;
+            w += derivative*sinZ;
+            acceleration -= frequency*frequency*coefficient*sinZ;
+            pressure += m/(k*k)*frequency*frequency*coefficient*cosZ;
+          }
         }
-        return {k,horizontal,verticalDisplacement};
+        return {k,horizontal,verticalDisplacement,u,w,acceleration,pressure};
       });
       layer = {weights,samples:new Map()};
       layers.set(z,layer);
     }
     if (layer.samples.has(x)) return layer.samples.get(x);
-    let dx = 0;
-    let dz = 0;
-    for (const {k,horizontal,verticalDisplacement} of layer.weights) {
-      const phase = k*(x*model.scale-centreX);
-      dx += horizontal*Math.sin(phase);
-      dz += verticalDisplacement*Math.cos(phase);
+    let phases = xPhases.get(x);
+    if (!phases) {
+      const coordinate = x*model.scale-centreX;
+      phases = frameModes.map(({k}) => [Math.sin(k*coordinate),Math.cos(k*coordinate)]);
+      xPhases.set(x,phases);
+    }
+    let dx = 0, dz = 0, u = 0, w = 0, acceleration = 0, pressure = 0, divergence = 0;
+    for (let i=0;i<layer.weights.length;i++) {
+      const term = layer.weights[i];
+      const [sinX,cosX] = phases[i];
+      dx += term.horizontal*sinX;
+      dz += term.verticalDisplacement*cosX;
+      if (diagnostics) {
+        u += term.u*sinX;
+        w += term.w*cosX;
+        acceleration += term.acceleration*cosX;
+        pressure += term.pressure*cosX;
+        divergence += term.k*term.u*cosX;
+      }
     }
     const displacement = {dx:factor*dx,dz:factor*dz};
+    if (diagnostics) {
+      const metres = factor*model.scale;
+      const buoyancy = -wave.medium*wave.medium*dz*metres;
+      const net = acceleration*metres;
+      return {
+        ...displacement,u:u*metres,w:w*metres,buoyancy,acceleration:net,
+        verticalPressure:net-buoyancy, pressure:1.2*pressure*metres,
+        divergence:divergence*metres,theta:300*buoyancy/9.81
+      };
+    }
     layer.samples.set(x,displacement);
     return displacement;
   };
@@ -802,6 +881,7 @@ function draw() {
     const balls = [];
     const localCentre = model.local && gain ? localCenterInView(elapsed) : null;
     const localSample = localCentre===null ? null : localField(elapsed,localCentre);
+    if (model.local) drawPhysics(elapsed,localCentre);
     const inertial = wave.experiment==='inertial' && gain>0 ? inertialOffset(elapsed,gain) : null;
     // Large displacements can carry balls into the box from outside its edges.
     const axisExtent = ballBounds.reduce((sum,extent,axis) => sum+extent*Math.abs(unit[axis]),0);
@@ -1055,6 +1135,7 @@ function applyPlayback() {
 play.addEventListener('click', () => {
   state.running = !state.running;
   applyPlayback();
+  draw();
 });
 
 injectWave.addEventListener('click', () => {
@@ -1065,7 +1146,7 @@ injectWave.addEventListener('click', () => {
     document.getElementById('show-rows').checked = true;
     setDisplayMode('rows');
   }
-  state.running = !reducedMotion.matches;
+  state.running = !physics.model.local && !reducedMotion.matches;
   applyPlayback();
   draw();
 });
@@ -1110,10 +1191,15 @@ function selectExperiment() {
   wave.enabled = wave.experiment!=='base';
   resetTime.textContent = wave.enabled?'回到基本场':'回到起点';
   const model = models[wave.experiment];
-  if (model.local) Object.assign(camera,{yaw:0,tilt:0,zoom:1});
+  physicalPanel.hidden = !model.local;
+  if (model.local) {
+    Object.assign(camera,{yaw:0,tilt:0,zoom:1});
+    probe = {x:0,z:0};
+    physicalVariable.value = 'buoyancy';
+  }
   injectWave.textContent = model.local?'施加中心扰动':'加入扰动';
   document.getElementById('injection-hint').textContent = model.local
-    ? '从稳定层结开始，只在中心附近施加一次上抬。随后观察扰动自行传播。'
+    ? '从稳定层结开始，只在中心附近施加一次上抬。先暂停读受力，再单步或播放看传播。'
     : '基本场 + 扰动 = 总场。加入时逐渐提高扰动振幅，便于看清叠加过程。';
   document.getElementById('wave-details').hidden = !wave.enabled;
   document.getElementById('experiment-hint').textContent = model.hint||'';
@@ -1159,6 +1245,187 @@ for (const [id] of waveControls) {
     draw();
   });
 }
+const physicalPanel = document.getElementById('physical-panel');
+const physicsCanvas = document.getElementById('physics-view');
+const physicalVariable = document.getElementById('physical-variable');
+const physicsContext = physicsCanvas.getContext('2d');
+const physicalOutputs = [...document.querySelectorAll('[data-probe]')];
+const physicalFields = {
+  buoyancy:['m/s²','负浮力','正浮力',1],
+  theta:['K','偏冷','偏暖',300/9.81],
+  pressure:['Pa','低压扰动','高压扰动',400],
+  verticalPressure:['m/s²','向下','向上',1],
+  acceleration:['m/s²','向下','向上',1],
+  w:['m/s','下沉','上升',.6],
+  divergence:['s⁻¹','辐合','辐散',.004]
+};
+const plotMargin = {left:53,top:16,right:15,bottom:35};
+let probe = {x:0,z:0};
+let previousPlot = '';
+let plotTimestamp = -Infinity;
+const zeroDiagnostics = Object.fromEntries(
+  ['u','w','buoyancy','theta','pressure','verticalPressure','acceleration','divergence'].map(key=>[key,0])
+);
+function formatValue(value) {
+  if (Math.abs(value)<1e-10) return '0';
+  if (Math.abs(value)<.01) return value.toExponential(2);
+  return value.toFixed(3);
+}
+function plotGeometry() {
+  const width = physicsCanvas.clientWidth;
+  const height = physicsCanvas.clientHeight;
+  return {width,height, plotWidth:width-plotMargin.left-plotMargin.right,
+    plotHeight:height-plotMargin.top-plotMargin.bottom};
+}
+function updateProbe(sample) {
+  const value = sample(probe.x,probe.z);
+  const out = {...value,velocity:formatValue(value.u)+' / '+formatValue(value.w),
+    thermodynamic:formatValue(value.theta)+' / '+formatValue(value.pressure)};
+  for (const output of physicalOutputs) {
+    const current = out[output.dataset.probe];
+    output.value = typeof current==='number' ? formatValue(current) : current;
+  }
+  const scale = physics.model.scale;
+  document.getElementById('probe-coordinates').value =
+    'x '+(probe.x*scale).toFixed(0)+' m · z '+((probe.z+bounds[2])*scale).toFixed(0)+' m（距下边界）';
+}
+function drawPhysics(elapsed,centreX,force=false) {
+  if (!physicsContext || physicalPanel.hidden) return;
+  const geometry = plotGeometry();
+  const {width,height,plotWidth,plotHeight} = geometry;
+  if (plotWidth<=0 || plotHeight<=0) return;
+  const variable = physicalVariable.value;
+  const visualKey = [state.running,variable,centreX,physics.amplitude,wave.medium,probe.x,probe.z,width,height,document.documentElement.dataset.theme,elapsed].join('|');
+  const now = performance.now();
+  if (!force && (visualKey===previousPlot || (state.running && now-plotTimestamp<105))) return;
+  plotTimestamp = now;
+  previousPlot = visualKey;
+  const sample = centreX===null ? ()=>zeroDiagnostics : localField(elapsed,centreX,true);
+  const [units,negative,positive,multiplier] = physicalFields[variable];
+  const amplitude = physics.amplitude;
+  const n = wave.medium;
+  const base = variable==='w' || variable==='divergence' ? n*amplitude : n*n*amplitude;
+  const limit = multiplier*base;
+  document.getElementById('physical-negative').textContent=negative+' '+formatValue(-limit);
+  document.getElementById('physical-positive').textContent=positive+' +'+formatValue(limit)+' '+units;
+  updateProbe(sample);
+
+  const density = Math.min(window.devicePixelRatio||1,2);
+  const pixels = Math.round(width*density);
+  const rows = Math.round(height*density);
+  if (physicsCanvas.width!==pixels) physicsCanvas.width=pixels;
+  if (physicsCanvas.height!==rows) physicsCanvas.height=rows;
+  const c = physicsContext;
+  c.setTransform(density,0,0,density,0,0);
+  c.clearRect(0,0,width,height);
+  const {left,top} = plotMargin;
+  const toX = x => left+(x/bounds[0]+1)*plotWidth/2;
+  const toY = z => top+(1-z/bounds[2])*plotHeight/2;
+  const columns = 60, levels = 25;
+  const cellWidth = plotWidth/columns, cellHeight = plotHeight/levels;
+  for (let j=0;j<levels;j++) {
+    const z = bounds[2]*(1-2*(j+.5)/levels);
+    for (let i=0;i<columns;i++) {
+      const x = bounds[0]*(2*(i+.5)/columns-1);
+      const value = sample(x,z)[variable];
+      const ratio = clamp(Math.abs(value)/limit,0,1);
+      if (ratio<.009) continue;
+      c.fillStyle = value>0 ? '#d55827' : '#2872b0';
+      c.globalAlpha = .88*ratio;
+      c.fillRect(left+i*cellWidth,top+j*cellHeight,cellWidth+.4,cellHeight+.4);
+    }
+  }
+  c.globalAlpha = 1;
+  c.strokeStyle = palette.frame;
+  c.lineWidth = 1;
+  c.strokeRect(left,top,plotWidth,plotHeight);
+  c.fillStyle = palette.muted;
+  c.font = '12px system-ui, sans-serif';
+  c.textBaseline = 'middle';
+  c.textAlign = 'right';
+  for (const z of [-bounds[2],0,bounds[2]]) {
+    c.fillText(((z+bounds[2])*physics.model.scale).toFixed(0),left-5,toY(z));
+  }
+  c.textAlign = 'center';
+  for (const x of [-bounds[0],0,bounds[0]]) {
+    c.fillText((x*physics.model.scale).toFixed(0),toX(x),top+plotHeight+9);
+  }
+  c.fillText('x（m）',left+plotWidth/2,height-7);
+  c.fillText('z（m）',23,top/2);
+  c.save();
+  c.beginPath();
+  c.rect(left,top,plotWidth,plotHeight);
+  c.clip();
+  c.strokeStyle = palette.muted;
+  c.globalAlpha = .9;
+  for (let j=1;j<9;j++) {
+    const z = bounds[2]*(1-2*j/9);
+    for (let i=1;i<21;i++) {
+      const x = bounds[0]*(2*i/21-1);
+      const {u,w} = sample(x,z);
+      const typical = n*amplitude;
+      const dx = u/typical*17, dy = -w/typical*17;
+      const length = Math.hypot(dx,dy);
+      if (length<1.3) continue;
+      const angle = Math.atan2(dy,dx), tip = Math.min(length*.45,4);
+      const startX = toX(x), startY = toY(z);
+      const endX = startX+dx, endY = startY+dy;
+      c.beginPath();
+      c.moveTo(startX,startY);
+      c.lineTo(endX,endY);
+      for (const offset of [-.54,.54]) {
+        c.moveTo(endX,endY);
+        c.lineTo(endX-tip*Math.cos(angle+offset),endY-tip*Math.sin(angle+offset));
+      }
+      c.stroke();
+    }
+  }
+  const x = toX(probe.x), y = toY(probe.z);
+  c.globalAlpha = 1;
+  if (centreX!==null) {
+    const sourceX = toX(centreX/physics.model.scale), sourceY = toY(0);
+    c.strokeStyle = palette.ball;
+    c.setLineDash([2,2]);
+    c.beginPath();
+    c.moveTo(sourceX-8,sourceY);
+    c.lineTo(sourceX+8,sourceY);
+    c.moveTo(sourceX,sourceY-8);
+    c.lineTo(sourceX,sourceY+8);
+    c.stroke();
+    c.setLineDash([]);
+  }
+  c.strokeStyle = palette.flow;
+  c.lineWidth = 2;
+  c.beginPath();
+  c.arc(x,y,6,0,2*Math.PI);
+  c.stroke();
+  c.restore();
+}
+function refreshPhysics() {
+  if (!physics.model?.local || physicalPanel.hidden) return;
+  const {elapsed,gain} = waveState();
+  drawPhysics(elapsed,gain ? localCenterInView(elapsed) : null,true);
+}
+physicalVariable.addEventListener('change',refreshPhysics);
+physicsCanvas.addEventListener('click', event => {
+  const rect=physicsCanvas.getBoundingClientRect();
+  const {plotWidth,plotHeight} = plotGeometry();
+  const x = (event.clientX-rect.left-plotMargin.left)/plotWidth;
+  const y = (event.clientY-rect.top-plotMargin.top)/plotHeight;
+  if (x<0 || x>1 || y<0 || y>1) return;
+  probe = {x:bounds[0]*(2*x-1),z:bounds[2]*(1-2*y)};
+  refreshPhysics();
+});
+physicsCanvas.addEventListener('keydown', event => {
+  const directions = {ArrowLeft:[-.17,0],ArrowRight:[.17,0],ArrowDown:[0,-.12],ArrowUp:[0,.12]};
+  if (!directions[event.key]) return;
+  event.preventDefault();
+  const [dx,dz] = directions[event.key];
+  probe = {x:clamp(probe.x+dx,-bounds[0],bounds[0]),z:clamp(probe.z+dz,-bounds[2],bounds[2])};
+  refreshPhysics();
+});
+new ResizeObserver(refreshPhysics).observe(physicsCanvas);
+
 experiment.value = 'base';
 setTheme('light');
 selectExperiment();
