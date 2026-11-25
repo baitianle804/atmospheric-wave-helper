@@ -44,6 +44,7 @@ h2 {font-size:19px;letter-spacing:.01em}
 .actions {display:flex;gap:7px}
 .btn {border:1px solid var(--line);background:var(--surface);padding:6px 10px;border-radius:8px;font-size:14px;white-space:nowrap}
 .btn.primary {background:var(--solid);border-color:var(--solid);color:var(--on-solid)}
+.btn:disabled {opacity:.45;cursor:default}
 .viewer {display:flex;flex-direction:column}
 .stage {position:relative;min-height:420px;flex:1;background:radial-gradient(ellipse at 48% 45%, var(--soft), transparent 72%),var(--stage)}
 .stage::before {position:absolute;inset:0;content:"";background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);background-size:28px 28px;pointer-events:none}
@@ -58,7 +59,10 @@ canvas:active {cursor:grabbing}
 .settings {padding:17px 19px 18px}
 .display-mode {padding:0;margin:0 0 17px;border:0;min-width:0}
 .display-mode legend {font-size:15px;font-weight:680;margin-bottom:7px;padding:0}
-.mode-options {display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.mode-options {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+.mode-options .btn {padding-inline:3px}
+.stage-key[data-mode="rows"] i {background:none;height:4px;border-top:4px dotted var(--flow)}
+.stage-key[data-mode="rows"] i::after {display:none}
 .mode-options input {position:absolute;width:1px;height:1px;opacity:0}
 .mode-options label {text-align:center;cursor:pointer}
 .mode-options input:checked + label {border-color:var(--accent);background:var(--soft);color:var(--accent)}
@@ -105,7 +109,7 @@ input[type=range] {width:100%;margin:0;display:block;cursor:pointer;accent-color
       </div></div>
       <div class="stage" id="stage">
         <canvas id="view" tabindex="0" aria-label="可旋转的三维均匀流场" aria-describedby="view-help">请使用支持 Canvas 的浏览器查看流场。</canvas>
-        <div class="stage-key"><i aria-hidden="true"></i><span id="flow-legend">逐点风矢量</span></div>
+        <div class="stage-key" id="flow-key" data-mode="rows"><i aria-hidden="true"></i><span id="flow-legend">示踪球串</span></div>
       </div>
       <div class="viewer-foot" id="view-help"><span>拖动旋转 · 滚轮缩放 · 方向键旋转</span><strong>x 向东 · y 向北 · z 向上</strong></div>
     </section>
@@ -115,8 +119,10 @@ input[type=range] {width:100%;margin:0;display:block;cursor:pointer;accent-color
         <fieldset class="display-mode">
           <legend>风场显示</legend>
           <div class="mode-options">
-            <input type="radio" id="show-vectors" name="flow-display" value="vectors" checked>
-            <label class="btn" for="show-vectors">逐点风箭头</label>
+            <input type="radio" id="show-rows" name="flow-display" value="rows" checked>
+            <label class="btn" for="show-rows">球串</label>
+            <input type="radio" id="show-vectors" name="flow-display" value="vectors">
+            <label class="btn" for="show-vectors">逐点箭头</label>
             <input type="radio" id="show-mean" name="flow-display" value="mean" aria-describedby="mean-note">
             <label class="btn" for="show-mean">平均风场</label>
           </div>
@@ -161,15 +167,21 @@ const play = document.querySelector('#play');
 const presets = [...document.querySelectorAll('[data-direction]')];
 const themeButtons = [...document.querySelectorAll('[data-theme-choice]')];
 const modeInputs = [...document.querySelectorAll('[name="flow-display"]')];
+const flowKey = document.getElementById('flow-key');
 const flowLegend = document.getElementById('flow-legend');
+const displayLabels = {rows:'示踪球串', vectors:'逐点风矢量', mean:'空间平均风矢量'};
 const meanNote = document.getElementById('mean-note');
 const defaultView = { yaw: -0.59, tilt: 0.53, zoom: 1 };
 const camera = {...defaultView};
 const bounds = [4.2, 2.65, 1.5];
 const radians = Math.PI / 180;
-const state = {speed: 12, direction: 270, elevation: 0, display: 'vectors', running: !matchMedia('(prefers-reduced-motion: reduce)').matches};
+const state = {speed: 12, direction: 270, elevation: 0, display: 'rows', running: !matchMedia('(prefers-reduced-motion: reduce)').matches};
 let velocity, unit, palette, width, height, drag, previousTime, animation;
-let travel = [0, 0, 0];
+const ballSpacing = .63;
+const ballRadius = .10;
+const ballBounds = bounds.map(radius => radius-ballRadius);
+let ballPhase = 0;
+let rows = [];
 
 const corners = [];
 for (const z of [-1, 1]) for (const y of [-1, 1]) for (const x of [-1, 1]) corners.push([x*bounds[0], y*bounds[1], z*bounds[2]]);
@@ -183,19 +195,42 @@ for (const z of [-0.88, 0, 0.88]) {
     for (const x of [-3.1,-1.55,0,1.55,3.1]) lattice.push([x,y,z]);
   }
 }
-const particles = Array.from({length:90}, (_, index) => bounds.map((radius, axis) => {
-  const value = (index+1) * [0.754877666,0.569840296,0.438579021][axis];
-  return (2*(value % 1)-1)*radius;
-}));
-
 function clamp(value, low, high) {return Math.max(low, Math.min(high, value));}
-function wrap(value, radius) {return ((value+radius)%(2*radius)+2*radius)%(2*radius)-radius;}
+
+function makeRows(direction, elevation) {
+  // Set out a grid in the plane perpendicular to the background flow.
+  const across = [Math.cos(direction), -Math.sin(direction), 0];
+  const up = [Math.sin(direction)*Math.sin(elevation), Math.cos(direction)*Math.sin(elevation), Math.cos(elevation)];
+  const acrossRadius = Math.min(...ballBounds.map((extent,i) => extent/Math.abs(across[i])));
+  const upRadius = Math.min(...ballBounds.map((extent,i) => extent/Math.abs(up[i])));
+  const result = [];
+  for (const level of [-.64, 0, .64]) {
+    for (const column of [-.73, -.365, 0, .365, .73]) {
+      const center = across.map((component,i) => component*column*acrossRadius + up[i]*level*upRadius);
+      // Keep the grid inside the box when both transverse axes are tilted.
+      const fit = Math.max(1,...center.map((position,i) => Math.abs(position)/(.88*ballBounds[i])));
+      const origin = center.map(position => position/fit);
+      let start = -Infinity;
+      let end = Infinity;
+      for (const [axis, component] of unit.entries()) {
+        if (Math.abs(component) < 1e-9) continue;
+        const lower = (-ballBounds[axis]-origin[axis])/component;
+        const upper = (ballBounds[axis]-origin[axis])/component;
+        start = Math.max(start,Math.min(lower,upper));
+        end = Math.min(end,Math.max(lower,upper));
+      }
+      result.push({origin, start, end});
+    }
+  }
+  return result;
+}
 
 function updateFlow() {
   const direction = state.direction * radians;
   const elevation = state.elevation * radians;
   unit = [-Math.sin(direction)*Math.cos(elevation), -Math.cos(direction)*Math.cos(elevation), Math.sin(elevation)];
   velocity = unit.map(value => value*state.speed);
+  rows = makeRows(direction, elevation);
   for (const [index, name] of ['u','v','w'].entries()) {
     document.getElementById(name).textContent = (Math.abs(velocity[index]) < .005 ? 0 : velocity[index]).toFixed(2);
   }
@@ -236,9 +271,10 @@ for (const name of ['speed', 'direction', 'elevation']) {
 for (const button of presets) button.addEventListener('click', () => setParameter('direction',+button.dataset.direction));
 function setDisplayMode(mode) {
   state.display = mode;
-  const showMean = mode === 'mean';
-  flowLegend.textContent = showMean ? '空间平均风矢量' : '逐点风矢量';
-  meanNote.hidden = !showMean;
+  flowKey.dataset.mode = mode;
+  flowLegend.textContent = displayLabels[mode];
+  meanNote.hidden = mode !== 'mean';
+  applyPlayback();
   draw();
 }
 for (const input of modeInputs) {
@@ -329,24 +365,38 @@ function draw() {
   ctx.globalAlpha = .75;
   for (const [a,b] of edges) line(points[a],points[b],palette.far,1);
   ctx.globalAlpha = 1;
-  if (state.speed > 0) {
-    if (state.display === 'vectors') {
-      const arrowLength = .25 + 1.23*Math.sqrt(state.speed/50);
-      for (const center of lattice) {
-        const start = project(center.map((coord,i) => coord-unit[i]*arrowLength/2));
-        const end = project(center.map((coord,i) => coord+unit[i]*arrowLength/2));
-        ctx.globalAlpha = .54 + .37*clamp((start[2]+6)/12,0,1);
-        arrow(start,end,palette.flow,1.55,7);
+  if (state.display === 'rows') {
+    const balls = [];
+    for (const {origin,start,end} of rows) {
+      const first = Math.ceil((start-ballPhase)/ballSpacing);
+      const last = Math.floor((end-ballPhase)/ballSpacing);
+      for (let index=first; index<=last; index++) {
+        const distance = index*ballSpacing + ballPhase;
+        const position = origin.map((coordinate,axis) => coordinate+unit[axis]*distance);
+        const opacity = clamp(Math.min(distance-start,end-distance)/(.30*ballSpacing),0,1);
+        balls.push({point:project(position), opacity});
       }
     }
-    for (const [index, seed] of particles.entries()) {
-      const point = seed.map((position,i) => wrap(position+travel[i],bounds[i]));
-      const [x,y] = project(point);
-      ctx.globalAlpha = .24 + (index%6)*.085;
+    balls.sort((a,b) => a.point[2]-b.point[2]);
+    const radius = scale*ballRadius;
+    for (const {point:[x,y,depth],opacity} of balls) {
+      ctx.globalAlpha = opacity*(.62+.38*clamp((depth+5.4)/10.8,0,1));
       ctx.beginPath();
-      ctx.arc(x,y,index%5 === 0 ? 2.3 : 1.45,0,Math.PI*2);
+      ctx.arc(x,y,radius,0,Math.PI*2);
+      ctx.fillStyle = palette.flow;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(x-radius*.28,y-radius*.31,radius*.47,0,Math.PI*2);
       ctx.fillStyle = palette.glow;
       ctx.fill();
+    }
+  } else if (state.display === 'vectors' && state.speed > 0) {
+    const arrowLength = .25 + 1.23*Math.sqrt(state.speed/50);
+    for (const center of lattice) {
+      const start = project(center.map((coord,i) => coord-unit[i]*arrowLength/2));
+      const end = project(center.map((coord,i) => coord+unit[i]*arrowLength/2));
+      ctx.globalAlpha = .54 + .37*clamp((start[2]+6)/12,0,1);
+      arrow(start,end,palette.flow,1.55,7);
     }
   }
   ctx.globalAlpha = 1;
@@ -431,18 +481,17 @@ function animate(now) {
   const dt = previousTime === undefined ? 0 : Math.min((now-previousTime)/1000,.05);
   previousTime = now;
   if (state.speed > 0) {
-    travel = travel.map((offset,i) => wrap(offset+velocity[i]*dt*.13,bounds[i]));
+    ballPhase = (ballPhase+state.speed*dt*.13)%ballSpacing;
     draw();
   }
   animation = requestAnimationFrame(animate);
 }
 function applyPlayback() {
-  play.textContent = state.running ? '暂停' : '播放';
-  if (state.running) animation = requestAnimationFrame(animate);
-  else {
-    cancelAnimationFrame(animation);
-    previousTime = undefined;
-  }
+  play.disabled = state.display !== 'rows';
+  play.textContent = state.running && !play.disabled ? '暂停' : '播放';
+  cancelAnimationFrame(animation);
+  previousTime = undefined;
+  if (state.running && !play.disabled) animation = requestAnimationFrame(animate);
 }
 play.addEventListener('click', () => {
   state.running = !state.running;
@@ -454,7 +503,6 @@ updateFlow();
 setDisplayMode(modeInputs.find(input => input.checked).value);
 new ResizeObserver(resize).observe(stage);
 resize();
-applyPlayback();
 </script>
 </body>
 </html>
