@@ -61,6 +61,10 @@ canvas:active {cursor:grabbing}
 .wave-toggle {display:flex;align-items:center;gap:8px;font-weight:680}
 .wave-toggle input {accent-color:var(--accent);width:17px;height:17px}
 .wave-details {margin-top:12px}
+.wave-start {background:var(--soft);border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:14px}
+.wave-start .btn {width:100%;margin-top:7px}
+.wave-start output {display:block;color:var(--muted);font-size:13px;margin-top:4px}
+.wave-start progress {display:block;width:100%;height:8px;accent-color:var(--accent);margin-top:7px}
 .reference-select {display:block;width:100%;margin-top:4px;padding:6px;border:1px solid var(--line);border-radius:7px;background:var(--page);color:var(--ink);font:inherit;font-size:14px}
 .wave-field {margin-top:10px}
 .wave-field label {font-size:14px}
@@ -118,7 +122,7 @@ input[type=range] {width:100%;margin:0;display:block;cursor:pointer;accent-color
 <main class="shell">
   <section class="intro" aria-labelledby="page-title">
     <h1 id="page-title">大气波动实验室</h1>
-    <p>选择一种波，再切换参考系观察质点、波峰和波包的运动。不同实验按各自的时间尺度播放。</p>
+    <p>先看未受扰动的基本场，再加入扰动，观察两者叠加后的运动。</p>
   </section>
   <div class="workspace">
     <section class="card viewer" aria-labelledby="view-title">
@@ -168,6 +172,13 @@ input[type=range] {width:100%;margin:0;display:block;cursor:pointer;accent-color
             <option value="rossby">大气长波（Rossby 波）</option>
           </select>
           <div class="wave-details" id="wave-details" hidden>
+            <div class="wave-start">
+              <strong id="wave-stage" role="status">基本场</strong>
+              <output id="wave-strength" aria-live="off">扰动强度 0%</output>
+              <progress id="wave-progress" max="1" value="0" aria-label="扰动相对强度"></progress>
+              <button type="button" class="btn primary" id="inject-wave">加入扰动</button>
+              <p class="hint">基本场 + 扰动 = 总场。加入时逐渐提高扰动振幅，便于看清叠加过程。</p>
+            </div>
             <label for="reference">参考系</label>
             <select class="reference-select" id="reference">
               <option value="ground">地面视角</option>
@@ -234,7 +245,8 @@ input[type=range] {width:100%;margin:0;display:block;cursor:pointer;accent-color
           <input id="elevation" type="range" min="-90" max="90" step="1" value="0">
           <div class="ends"><span>−90° 向下</span><span>0° 水平</span><span>90° 向上</span></div>
         </div>
-        <div class="readouts" aria-label="速度分量，米每秒">
+        <p class="hint" style="margin-top:14px">基本场速度分量</p>
+        <div class="readouts" aria-label="基本场速度分量，米每秒">
           <div class="metric"><span>东向 u</span><strong id="u">12.00</strong><small>m/s</small></div>
           <div class="metric"><span>北向 v</span><strong id="v">0.00</strong><small>m/s</small></div>
           <div class="metric"><span>垂直 w</span><strong id="w">0.00</strong><small>m/s</small></div>
@@ -311,7 +323,14 @@ const models = {
     explanation:'β 平面上的一维正压 Rossby 波。地面相速 U − β/k²，群速度 U + β/k²。此模型针对课件中的理想化西风带。'}
 };
 const middleRow = 7;
-const wave = {experiment:'base', enabled:false, reference:'ground', time:0};
+const wave = {experiment:'base', enabled:false, reference:'ground', time:0, startedAt:null};
+const rampPlaybackSeconds = 3;
+const injectWave = document.getElementById('inject-wave');
+const waveStage = document.getElementById('wave-stage');
+const waveStrength = document.getElementById('wave-strength');
+const waveProgress = document.getElementById('wave-progress');
+const resetTime = document.getElementById('reset-time');
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const experiment = document.getElementById('experiment');
 const waveControls = [
   ['amplitude','amplitude'],['wavelength','wavelength'],['phase-speed','phaseSpeed'],
@@ -380,6 +399,7 @@ function updateFlow() {
   transverse = [Math.sin(direction)*Math.sin(elevation), Math.cos(direction)*Math.sin(elevation), Math.cos(elevation)];
   rows = makeRows(direction);
   wave.time = 0;
+  wave.startedAt = null;
   trackedBall = {row:middleRow,index:0};
   for (const [index, name] of ['u','v','w'].entries()) {
     document.getElementById(name).textContent = (Math.abs(velocity[index]) < .005 ? 0 : velocity[index]).toFixed(2);
@@ -396,6 +416,7 @@ function updateFlow() {
     note.textContent = `${state.direction}° ${approx}${compass[sector]}来，${qualifier}${compass[(sector+4)%8]}。`;
   }
   updatePhysics();
+  updateWaveStage(waveState().gain);
   draw();
 }
 
@@ -500,22 +521,38 @@ function rowPosition(row, distance) {
 function packetEnvelope(x, groupDistance) {
   return Math.abs(Math.cos(.10*physics.k*(x-groupDistance)));
 }
-function surfaceHeight(x, crestDistance) {
-  return 1.02 + .33*physics.amplitude/2*Math.cos(physics.k*(x-crestDistance));
+function waveState() {
+  if (wave.startedAt===null) return {elapsed:0,gain:0};
+  const elapsed = wave.time-wave.startedAt;
+  const fraction = clamp(elapsed/(rampPlaybackSeconds*physics.model.rate),0,1);
+  return {elapsed,gain:fraction*fraction*(3-2*fraction)};
 }
-function inertialOffset() {
+function updateWaveStage(gain) {
+  if (!wave.enabled) return;
+  const pending = wave.startedAt===null;
+  const status = pending ? '基本场' : gain<1 ? '正在加入扰动' : '总场（基本场 + 扰动）';
+  if (waveStage.textContent!==status) waveStage.textContent = status;
+  waveStrength.value = '扰动强度 '+Math.round(100*gain)+'%';
+  waveProgress.value = gain;
+  injectWave.disabled = !pending;
+}
+function surfaceHeight(x, crestDistance, gain) {
+  return 1.02 + gain*.33*physics.amplitude/2*Math.cos(physics.k*(x-crestDistance));
+}
+function inertialOffset(elapsed, gain) {
   const {f,model,amplitude} = physics;
-  const angle = f*wave.time;
+  const angle = f*elapsed;
   // Set the initial speed using the specified radius at 45° latitude.
-  const initialSpeed = amplitude/model.scale*2*7.292115e-5*Math.sin(45*radians);
-  if (Math.abs(f)<1e-9) return {x:0,y:-initialSpeed*wave.time,radius:0};
+  const initialSpeed = gain*amplitude/model.scale*2*7.292115e-5*Math.sin(45*radians);
+  if (Math.abs(f)<1e-9) return {x:0,y:-initialSpeed*elapsed,radius:0};
   const radius = initialSpeed/f;
   return {x:radius*(Math.cos(angle)-1),y:-radius*Math.sin(angle),radius};
 }
-function sampleBall(row,distance,crestDistance,groupDistance,inertial) {
+function sampleBall(row,distance,crestDistance,groupDistance,inertial,gain) {
   const position = rowPosition(row,distance);
-  const {model,f,k,m,sigma,amplitude} = physics;
-  if (!wave.enabled || model.surface) return {position,compression:0};
+  const {model,f,k,m,sigma} = physics;
+  if (!gain || model.surface) return {position,compression:0};
+  const amplitude = gain*physics.amplitude;
   const x = distance*model.scale;
   const phase = k*(x-crestDistance);
   let displacement = amplitude/model.scale*Math.cos(phase);
@@ -524,7 +561,7 @@ function sampleBall(row,distance,crestDistance,groupDistance,inertial) {
     case 'sound':
       displacement = -amplitude/model.scale*Math.sin(phase);
       position[0] += displacement;
-      compression = Math.max(0,Math.cos(phase));
+      compression = gain*Math.max(0,Math.cos(phase));
       break;
     case 'rossby':
       position[1] += displacement;
@@ -554,7 +591,7 @@ function sampleBall(row,distance,crestDistance,groupDistance,inertial) {
 function insideBox(position) {
   return position.every((coordinate,axis) => Math.abs(coordinate)<=ballBounds[axis]+1e-9);
 }
-function updateTracking(motion, ballDistance, crestDistance, ballPosition, basePosition, ballVisible, crestVisible) {
+function updateTracking(motion, ballDistance, crestDistance, ballPosition, basePosition, ballVisible, crestVisible, gain) {
   const {model,f,verticalGroup} = physics;
   const signed = value => (Math.abs(value)<.005 ? 0 : value).toFixed(2);
   const longScale = model.scale>=10000;
@@ -564,10 +601,16 @@ function updateTracking(motion, ballDistance, crestDistance, ballPosition, baseP
   const shift = Math.hypot(...ballPosition.map((coordinate,axis) => coordinate-basePosition[axis]));
   ballReading.value = '基流 '+signed(motion.ballSpeed)+' m/s · '+distance(ballDistance)+offscreen(ballVisible);
   if (!model.surface && !model.internal) ballReading.value += ' · 偏移 '+distance(shift*model.scale);
-  crestReading.value = wave.experiment==='inertial' ? '纯振荡，无传播波峰' :
-    signed(motion.crestSpeed)+' m/s · '+distance(crestDistance)+offscreen(crestVisible);
   const diagnostic = document.getElementById('wave-diagnostic');
   const label = document.getElementById('diagnostic-label');
+  if (!gain) {
+    crestReading.value = '尚无可见扰动';
+    label.textContent = '基本场';
+    diagnostic.value = model.surface ? '自由面水平' : model.internal ? '各层保持原高度' : '球串保持笔直';
+    return;
+  }
+  crestReading.value = wave.experiment==='inertial' ? '纯振荡，无传播波峰' :
+    signed(motion.crestSpeed)+' m/s · '+distance(crestDistance)+offscreen(crestVisible);
   label.textContent = wave.experiment==='inertial'?'惯性周期':'群速度';
   if (wave.experiment==='inertial') diagnostic.value = f===0?'无惯性周期':(2*Math.PI/Math.abs(f)/3600).toFixed(1)+' h';
   else if (motion.groupSpeed===null) {
@@ -659,19 +702,20 @@ function draw() {
     const motion = motionInView();
     const {model} = physics;
     const advance = motion.ballSpeed*wave.time/model.scale;
-    const crestDistance = motion.crestSpeed*wave.time;
-    const groupDistance = motion.groupSpeed*wave.time;
+    const {elapsed,gain} = waveState();
+    const crestDistance = motion.crestSpeed*elapsed;
+    const groupDistance = motion.groupSpeed*elapsed;
     const balls = [];
-    const inertial = wave.experiment==='inertial' ? inertialOffset() : null;
+    const inertial = wave.experiment==='inertial' && gain>0 ? inertialOffset(elapsed,gain) : null;
     // Large displacements can carry balls into the box from outside its edges.
     const axisExtent = ballBounds.reduce((sum,extent,axis) => sum+extent*Math.abs(unit[axis]),0);
     for (const [rowIndex,row] of rows.entries()) {
-      const shift = inertial ? Math.abs(inertial.x) : wave.enabled && !model.surface ? 1.4 : 0;
+      const shift = inertial ? Math.abs(inertial.x) : gain && !model.surface ? 1.4 : 0;
       const first = Math.ceil((-axisExtent-advance-shift)/ballSpacing);
       const last = Math.floor((axisExtent-advance+shift)/ballSpacing);
       for (let index=first; index<=last; index++) {
         const distance = index*ballSpacing+advance;
-        const {position,compression} = sampleBall(row,distance,crestDistance,groupDistance,inertial);
+        const {position,compression} = sampleBall(row,distance,crestDistance,groupDistance,inertial,gain);
         if (!insideBox(position)) continue;
         const margin = Math.min(...ballBounds.map((extent,axis) => extent-Math.abs(position[axis])));
         const opacity = clamp(margin/.08,0,1);
@@ -681,7 +725,17 @@ function draw() {
     balls.sort((a,b) => a.point[2]-b.point[2]);
     const radius = scale*ballRadius;
     hitTargets = balls.filter(ball => ball.opacity>.15).map(ball => ({...ball,radius}));
-    if (wave.enabled && !model.surface) {
+    if (model.internal) {
+      ctx.globalAlpha = .24;
+      ctx.setLineDash([3,5]);
+      for (const z of [-.9,0,.9]) {
+        const layer = [[-bounds[0],-bounds[1],z],[bounds[0],-bounds[1],z],
+          [bounds[0],bounds[1],z],[-bounds[0],bounds[1],z]].map(point => project(point));
+        for (let i=0;i<4;i++) line(layer[i],layer[(i+1)%4],palette.mesh);
+      }
+      ctx.setLineDash([]);
+    }
+    if (gain>0 && !model.surface) {
       ctx.globalAlpha = .30;
       ctx.setLineDash([4,5]);
       for (const row of rows) {
@@ -701,14 +755,14 @@ function draw() {
       const ballDistance = trackedBall.index*ballSpacing+advance;
       const row = rows[trackedBall.row];
       const basePosition = rowPosition(row,ballDistance);
-      const {position:ballPosition} = sampleBall(row,ballDistance,crestDistance,groupDistance,inertial);
+      const {position:ballPosition} = sampleBall(row,ballDistance,crestDistance,groupDistance,inertial,gain);
       const axisPosition = crestDistance/model.scale;
       const crestPosition = model.surface
-        ? [axisPosition,0,surfaceHeight(crestDistance,crestDistance)]
-        : sampleBall(rows[middleRow],axisPosition,crestDistance,groupDistance,inertial).position;
+        ? [axisPosition,0,surfaceHeight(crestDistance,crestDistance,gain)]
+        : sampleBall(rows[middleRow],axisPosition,crestDistance,groupDistance,inertial,gain).position;
       const ballVisible = insideBox(ballPosition);
-      const crestVisible = wave.experiment!=='inertial' && insideBox(crestPosition);
-      if (model.surface || wave.experiment==='packet') {
+      const crestVisible = gain>0 && wave.experiment!=='inertial' && insideBox(crestPosition);
+      if (model.surface || (gain>0 && wave.experiment==='packet')) {
         const tracks = model.surface ? [-2.0,-1,0,1,2.0] : [-1,1];
         if (!model.surface) ctx.setLineDash([5,4]);
         for (const y of tracks) {
@@ -716,9 +770,9 @@ function draw() {
           for (let i=0;i<=100;i++) {
             const x = bounds[0]*(i/50-1);
             const physicalX = x*model.scale;
-            const envelope = physics.amplitude/model.scale*packetEnvelope(physicalX,groupDistance);
+            const envelope = gain*physics.amplitude/model.scale*packetEnvelope(physicalX,groupDistance);
             const position = model.surface
-              ? [x,y,surfaceHeight(physicalX,crestDistance)]
+              ? [x,y,surfaceHeight(physicalX,crestDistance,gain)]
               : rowPosition(rows[middleRow],x).map((value,axis) => value+y*transverse[axis]*envelope);
             const point = project(position);
             if (prior) line(prior,point,model.surface?palette.crest:palette.ball,1.7);
@@ -727,7 +781,7 @@ function draw() {
         }
         ctx.setLineDash([]);
       }
-      if (inertial?.radius) {
+      if (inertial?.radius && gain===1) {
         let prior;
         ctx.globalAlpha = .75;
         ctx.setLineDash([4,4]);
@@ -762,7 +816,8 @@ function draw() {
         ctx.lineWidth = 2.5;
         ctx.stroke();
       }
-      updateTracking(motion,ballDistance*model.scale,crestDistance,ballPosition,basePosition,ballVisible,crestVisible);
+      updateWaveStage(gain);
+      updateTracking(motion,ballDistance*model.scale,crestDistance,ballPosition,basePosition,ballVisible,crestVisible,gain);
     }
   } else if (state.display === 'vectors' && state.speed > 0) {
     const arrowLength = .25 + 1.23*Math.sqrt(state.speed/50);
@@ -896,8 +951,21 @@ play.addEventListener('click', () => {
   applyPlayback();
 });
 
-document.getElementById('reset-time').addEventListener('click', () => {
+injectWave.addEventListener('click', () => {
+  if (!wave.enabled || wave.startedAt!==null) return;
+  wave.startedAt = wave.time;
+  if (state.display!=='rows') {
+    document.getElementById('show-rows').checked = true;
+    setDisplayMode('rows');
+  }
+  state.running = !reducedMotion.matches;
+  applyPlayback();
+  draw();
+});
+resetTime.addEventListener('click', () => {
   wave.time = 0;
+  wave.startedAt = null;
+  updateWaveStage(0);
   trackedBall = {row:middleRow,index:0};
   state.running = false;
   applyPlayback();
@@ -933,6 +1001,7 @@ function selectExperiment() {
   if (['base','sine','packet'].includes(wave.experiment)) freeWind = {direction:state.direction,elevation:state.elevation};
   wave.experiment = experiment.value;
   wave.enabled = wave.experiment!=='base';
+  resetTime.textContent = wave.enabled?'回到基本场':'回到起点';
   const model = models[wave.experiment];
   document.getElementById('wave-details').hidden = !wave.enabled;
   document.getElementById('experiment-hint').textContent = model.hint||'';
@@ -946,7 +1015,8 @@ function selectExperiment() {
     const [label,min,max,stepValue,value] = control;
     const input = document.getElementById(id);
     Object.assign(input,{min,max,step:stepValue,value});
-    if (id==='amplitude' || id==='medium') document.getElementById(id+'-label').textContent = label;
+    if (id==='amplitude') document.getElementById('amplitude-label').textContent = '目标'+label;
+    if (id==='medium') document.getElementById('medium-label').textContent = label;
   }
   const fixed = !['base','sine','packet'].includes(wave.experiment);
   document.getElementById('fixed-wind').hidden = !fixed;
