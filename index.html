@@ -8,13 +8,13 @@
 <style>
 :root {
   color-scheme: light;
-  --page:#eff4f2; --surface:#fcfefd; --ink:#142b26; --muted:#49635b; --line:#d9e5e0;
+  --ball:#ae4f12; --crest:#6033a9; --reference:#526963; --page:#eff4f2; --surface:#fcfefd; --ink:#142b26; --muted:#49635b; --line:#d9e5e0;
   --stage:#f3faf7; --soft:#e4f3ec; --accent:#087653; --solid:#07694a; --on-solid:#fff;
   --grid:#3d796014; --frame:#628c7e; --mesh:#83a99a; --far:#7b9c90; --flow:#14805f; --glow:#43c194; --face:#a8dccc36;
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --page:#0e1715; --surface:#15221e; --ink:#e9f6ef; --muted:#a7c0b5; --line:#2b4138;
+  --ball:#ffb678; --crest:#c5a9ff; --reference:#afc4bc; --page:#0e1715; --surface:#15221e; --ink:#e9f6ef; --muted:#a7c0b5; --line:#2b4138;
   --stage:#0d1916; --soft:#1e392f; --accent:#83e0bc; --solid:#8be5c2; --on-solid:#10291f;
   --grid:#a9e0cc13; --frame:#7cb6a2; --mesh:#528171; --far:#507969; --flow:#67d8ad; --glow:#7ff0c4; --face:#4a9e7e22;
 }
@@ -57,6 +57,25 @@ canvas:active {cursor:grabbing}
 .viewer-foot strong {color:var(--accent);font-weight:650}
 .controls .bar {justify-content:flex-start}
 .settings {padding:17px 19px 18px}
+.wave-panel {margin-bottom:18px;padding-bottom:16px;border-bottom:1px solid var(--line)}
+.wave-toggle {display:flex;align-items:center;gap:8px;font-weight:680}
+.wave-toggle input {accent-color:var(--accent);width:17px;height:17px}
+.wave-details {margin-top:12px}
+.reference-select {display:block;width:100%;margin-top:4px;padding:6px;border:1px solid var(--line);border-radius:7px;background:var(--page);color:var(--ink);font:inherit;font-size:14px}
+.wave-field {margin-top:10px}
+.wave-field label {font-size:14px}
+.viewer .bar {flex-wrap:wrap}
+.viewer .actions {flex-wrap:wrap}
+.tracking {padding:13px 19px;border-top:1px solid var(--line);font-size:14px}
+.tracking-head {display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.tracking-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px}
+.tracking-grid div {background:var(--page);border-radius:8px;padding:7px 9px}
+.tracking-grid strong,.tracking-grid output {display:block}
+.ball-color {color:var(--ball)}
+.crest-color {color:var(--crest)}
+.model {margin-top:12px;font-size:14px;color:var(--muted)}
+.model summary {cursor:pointer;color:var(--ink)}
+.model p {margin-top:6px}
 .display-mode {padding:0;margin:0 0 17px;border:0;min-width:0}
 .display-mode legend {font-size:15px;font-weight:680;margin-bottom:7px;padding:0}
 .mode-options {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
@@ -98,24 +117,65 @@ input[type=range] {width:100%;margin:0;display:block;cursor:pointer;accent-color
 </div></header>
 <main class="shell">
   <section class="intro" aria-labelledby="page-title">
-    <h1 id="page-title">均匀背景流</h1>
-    <p>改变风速和方向，观察长方体中各点共享的速度矢量。</p>
+    <h1 id="page-title">背景流与简谐波</h1>
+    <p>追踪一颗小球和一个波峰，比较质点振动与波的传播。</p>
   </section>
   <div class="workspace">
     <section class="card viewer" aria-labelledby="view-title">
       <div class="bar"><h2 id="view-title">三维视窗</h2><div class="actions">
         <button class="btn" type="button" id="reset-view">重置视角</button>
+        <button class="btn" type="button" id="reset-time">回到起点</button>
+        <button class="btn" type="button" id="step">前进 2 秒</button>
         <button class="btn primary" type="button" id="play">暂停</button>
       </div></div>
       <div class="stage" id="stage">
-        <canvas id="view" tabindex="0" aria-label="可旋转的三维均匀流场" aria-describedby="view-help">请使用支持 Canvas 的浏览器查看流场。</canvas>
+        <canvas id="view" tabindex="0" aria-label="可旋转的三维球串与波峰" aria-describedby="view-help">请使用支持 Canvas 的浏览器查看流场。</canvas>
         <div class="stage-key" id="flow-key" data-mode="rows"><i aria-hidden="true"></i><span id="flow-legend">示踪球串</span></div>
       </div>
-      <div class="viewer-foot" id="view-help"><span>拖动旋转 · 滚轮缩放 · 方向键旋转</span><strong>x 向东 · y 向北 · z 向上</strong></div>
+      <div class="viewer-foot" id="view-help"><span>拖动旋转 · 滚轮缩放 · 开启扰动后可点球追踪</span><strong>x 向东 · y 向北 · z 向上</strong></div>
+      <section class="tracking" id="tracking" aria-label="波动追踪" hidden>
+        <div class="tracking-head">
+          <strong>当前参考系中的运动</strong>
+          <output id="wave-time" aria-label="模拟时间" aria-live="off"></output>
+        </div>
+        <div class="tracking-grid">
+          <div><strong class="ball-color">橙圈 · 被追踪小球</strong><output id="ball-reading" aria-live="off"></output></div>
+          <div><strong class="crest-color">紫菱形 · 被追踪波峰</strong><output id="crest-reading" aria-live="off"></output></div>
+          <div><strong>灰色虚线 · 无扰动参照</strong><p>速度和位置沿背景流方向计，顺风为正</p></div>
+        </div>
+      </section>
     </section>
     <aside class="card controls" aria-labelledby="control-title">
       <div class="bar"><h2 id="control-title">流场设置</h2></div>
       <div class="settings">
+        <div class="wave-panel">
+          <label class="wave-toggle"><input id="wave-enabled" type="checkbox">加入简谐扰动</label>
+          <div class="wave-details" id="wave-details" hidden>
+            <label for="reference">参考系</label>
+            <select class="reference-select" id="reference">
+              <option value="ground">地面视角</option>
+              <option value="flow">随背景流视角</option>
+            </select>
+            <div class="wave-field">
+              <div class="label-row"><label for="amplitude">振幅</label><output id="amplitude-value"></output></div>
+              <input id="amplitude" type="range" min="1" max="65" value="38">
+            </div>
+            <div class="wave-field">
+              <div class="label-row"><label for="wavelength">波长</label><output id="wavelength-value"></output></div>
+              <input id="wavelength" type="range" min="180" max="850" step="10" value="380">
+            </div>
+            <div class="wave-field">
+              <div class="label-row"><label for="phase-speed">相对背景流的波速</label><output id="phase-speed-value"></output></div>
+              <input id="phase-speed" type="range" min="-30" max="30" value="-8">
+              <div class="ends"><span>逆风 −30</span><span>顺风 +30 m/s</span></div>
+            </div>
+            <details class="model">
+              <summary>简单模型</summary>
+              <p>沿背景流取坐标 s，小球沿 s 方向以风速 U 移动，并垂直于背景流振动。水平风时，振动就是上下起伏。</p>
+              <p>位移 = A cos[2π(s − (U + c) t)/λ]。这里 s 是地面视角坐标，c 是相对背景流的波速。这是预设波形的运动学演示。</p>
+            </details>
+          </div>
+        </div>
         <fieldset class="display-mode">
           <legend>风场显示</legend>
           <div class="mode-options">
@@ -180,8 +240,21 @@ let velocity, unit, palette, width, height, drag, previousTime, animation;
 const ballSpacing = .63;
 const ballRadius = .10;
 const ballBounds = bounds.map(radius => radius-ballRadius);
-let ballPhase = 0;
+const metresPerUnit = 100;
+const timeScale = 3;
+const middleRow = 7;
+const wave = {enabled:false, reference:'ground', amplitude:38, wavelength:380, phaseSpeed:-8, time:0};
+let trackedBall = {row:middleRow, index:0};
+let transverse;
+let hitTargets = [];
 let rows = [];
+const waveEnabled = document.getElementById('wave-enabled');
+const reference = document.getElementById('reference');
+const tracking = document.getElementById('tracking');
+const waveTime = document.getElementById('wave-time');
+const ballReading = document.getElementById('ball-reading');
+const crestReading = document.getElementById('crest-reading');
+const step = document.getElementById('step');
 
 const corners = [];
 for (const z of [-1, 1]) for (const y of [-1, 1]) for (const x of [-1, 1]) corners.push([x*bounds[0], y*bounds[1], z*bounds[2]]);
@@ -197,10 +270,10 @@ for (const z of [-0.88, 0, 0.88]) {
 }
 function clamp(value, low, high) {return Math.max(low, Math.min(high, value));}
 
-function makeRows(direction, elevation) {
+function makeRows(direction) {
   // Set out a grid in the plane perpendicular to the background flow.
   const across = [Math.cos(direction), -Math.sin(direction), 0];
-  const up = [Math.sin(direction)*Math.sin(elevation), Math.cos(direction)*Math.sin(elevation), Math.cos(elevation)];
+  const up = transverse;
   const acrossRadius = Math.min(...ballBounds.map((extent,i) => extent/Math.abs(across[i])));
   const upRadius = Math.min(...ballBounds.map((extent,i) => extent/Math.abs(up[i])));
   const result = [];
@@ -230,7 +303,10 @@ function updateFlow() {
   const elevation = state.elevation * radians;
   unit = [-Math.sin(direction)*Math.cos(elevation), -Math.cos(direction)*Math.cos(elevation), Math.sin(elevation)];
   velocity = unit.map(value => value*state.speed);
-  rows = makeRows(direction, elevation);
+  transverse = [Math.sin(direction)*Math.sin(elevation), Math.cos(direction)*Math.sin(elevation), Math.cos(elevation)];
+  rows = makeRows(direction);
+  wave.time = 0;
+  trackedBall = {row:middleRow,index:0};
   for (const [index, name] of ['u','v','w'].entries()) {
     document.getElementById(name).textContent = (Math.abs(velocity[index]) < .005 ? 0 : velocity[index]).toFixed(2);
   }
@@ -238,7 +314,7 @@ function updateFlow() {
   const compass = ['北','东北','东','东南','南','西南','西','西北'];
   const sector = Math.round(state.direction/45)%8;
   const note = document.getElementById('heading-note');
-  if (state.speed === 0) note.textContent = '静风 · 三个速度分量均为 0。';
+  if (state.speed === 0) note.textContent = '静风 · 风向仍决定球串的排列轴。';
   else if (Math.abs(state.elevation) === 90) note.textContent = '纯垂直流 · 水平分量为 0。';
   else {
     const approx = state.direction%45 ? '约从' : '从';
@@ -274,6 +350,7 @@ function setDisplayMode(mode) {
   flowKey.dataset.mode = mode;
   flowLegend.textContent = displayLabels[mode];
   meanNote.hidden = mode !== 'mean';
+  tracking.hidden = !wave.enabled || mode !== 'rows';
   applyPlayback();
   draw();
 }
@@ -287,11 +364,36 @@ function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   for (const button of themeButtons) button.setAttribute('aria-pressed', button.dataset.themeChoice === theme);
   const style = getComputedStyle(document.documentElement);
-  palette = Object.fromEntries(['frame','mesh','far','flow','glow','face','muted'].map(name => [name, style.getPropertyValue('--'+name).trim()]));
+  palette = Object.fromEntries(['frame','mesh','far','flow','glow','face','muted','ball','crest','reference'].map(name => [name, style.getPropertyValue('--'+name).trim()]));
   draw();
 }
 for (const button of themeButtons) button.addEventListener('click', () => setTheme(button.dataset.themeChoice));
 
+function motionInView() {
+  const frameSpeed = wave.enabled && wave.reference === 'flow' ? state.speed : 0;
+  return {
+    ballSpeed: state.speed-frameSpeed,
+    crestSpeed: state.speed+wave.phaseSpeed-frameSpeed
+  };
+}
+function rowPosition(row, distance, displacement=0) {
+  return row.origin.map((coordinate,axis) => coordinate+unit[axis]*distance+transverse[axis]*displacement);
+}
+function waveDisplacement(distance, crestDistance) {
+  return wave.enabled
+    ? wave.amplitude/metresPerUnit * Math.cos(2*Math.PI*(distance-crestDistance)*metresPerUnit/wave.wavelength)
+    : 0;
+}
+function insideBox(position) {
+  return position.every((coordinate,axis) => Math.abs(coordinate)<=ballBounds[axis]+1e-9);
+}
+function updateTracking(ballSpeed, crestSpeed, ballDistance, crestDistance, displacement, ballVisible, crestVisible) {
+  const signed = value => (Math.abs(value)<.05 ? 0 : value).toFixed(1);
+  const time = wave.time.toFixed(1);
+  waveTime.value = 't = '+time+' s';
+  ballReading.value = signed(ballSpeed)+' m/s · '+signed(ballDistance*metresPerUnit)+' m · 横向位移 '+signed(displacement*metresPerUnit)+' m'+(ballVisible?'':' · 已出视窗');
+  crestReading.value = signed(crestSpeed)+' m/s · '+signed(crestDistance*metresPerUnit)+' m'+(crestVisible?'':' · 已出视窗');
+}
 function draw() {
   if (!ctx || !width || !palette || !velocity) return;
   ctx.clearRect(0,0,width,height);
@@ -366,19 +468,38 @@ function draw() {
   for (const [a,b] of edges) line(points[a],points[b],palette.far,1);
   ctx.globalAlpha = 1;
   if (state.display === 'rows') {
+    const {ballSpeed,crestSpeed} = motionInView();
+    const advance = ballSpeed*wave.time/metresPerUnit;
+    const crestDistance = crestSpeed*wave.time/metresPerUnit;
     const balls = [];
-    for (const {origin,start,end} of rows) {
-      const first = Math.ceil((start-ballPhase)/ballSpacing);
-      const last = Math.floor((end-ballPhase)/ballSpacing);
+    // Project the whole box onto the flow axis to find all candidate balls
+    // when the rows bend. The displaced position is then clipped in 3D.
+    const axisExtent = ballBounds.reduce((sum,extent,axis) => sum+extent*Math.abs(unit[axis]),0);
+    for (const [rowIndex,row] of rows.entries()) {
+      const start = wave.enabled ? -axisExtent : row.start;
+      const end = wave.enabled ? axisExtent : row.end;
+      const first = Math.ceil((start-advance)/ballSpacing);
+      const last = Math.floor((end-advance)/ballSpacing);
       for (let index=first; index<=last; index++) {
-        const distance = index*ballSpacing + ballPhase;
-        const position = origin.map((coordinate,axis) => coordinate+unit[axis]*distance);
-        const opacity = clamp(Math.min(distance-start,end-distance)/(.30*ballSpacing),0,1);
-        balls.push({point:project(position), opacity});
+        const distance = index*ballSpacing+advance;
+        const position = rowPosition(row,distance,waveDisplacement(distance,crestDistance));
+        if (!insideBox(position)) continue;
+        const margin = Math.min(...ballBounds.map((extent,axis) => extent-Math.abs(position[axis])));
+        const opacity = clamp(margin/(.25*ballSpacing),0,1);
+        balls.push({point:project(position),opacity,row:rowIndex,index});
       }
     }
     balls.sort((a,b) => a.point[2]-b.point[2]);
     const radius = scale*ballRadius;
+    hitTargets = balls.filter(ball => ball.opacity>.15).map(ball => ({...ball,radius}));
+    if (wave.enabled) {
+      ctx.globalAlpha = .33;
+      ctx.setLineDash([4,5]);
+      for (const row of rows) {
+        line(project(rowPosition(row,row.start)),project(rowPosition(row,row.end)),palette.reference);
+      }
+      ctx.setLineDash([]);
+    }
     for (const {point:[x,y,depth],opacity} of balls) {
       ctx.globalAlpha = opacity*(.62+.38*clamp((depth+5.4)/10.8,0,1));
       ctx.beginPath();
@@ -389,6 +510,36 @@ function draw() {
       ctx.arc(x-radius*.28,y-radius*.31,radius*.47,0,Math.PI*2);
       ctx.fillStyle = palette.glow;
       ctx.fill();
+    }
+    if (wave.enabled) {
+      ctx.globalAlpha = 1;
+      const ballDistance = trackedBall.index*ballSpacing+advance;
+      const displacement = waveDisplacement(ballDistance,crestDistance);
+      const ballPosition = rowPosition(rows[trackedBall.row],ballDistance,displacement);
+      const crestPosition = rowPosition(rows[middleRow],crestDistance,wave.amplitude/metresPerUnit);
+      const ballVisible = insideBox(ballPosition);
+      const crestVisible = insideBox(crestPosition);
+      if (crestVisible) {
+        const [x,y] = project(crestPosition);
+        ctx.beginPath();
+        ctx.moveTo(x,y-7);
+        ctx.lineTo(x+7,y);
+        ctx.lineTo(x,y+7);
+        ctx.lineTo(x-7,y);
+        ctx.closePath();
+        ctx.strokeStyle = palette.crest;
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+      }
+      if (ballVisible) {
+        const [x,y] = project(ballPosition);
+        ctx.beginPath();
+        ctx.arc(x,y,radius+4,0,Math.PI*2);
+        ctx.strokeStyle = palette.ball;
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+      }
+      updateTracking(ballSpeed,crestSpeed,ballDistance,crestDistance,displacement,ballVisible,crestVisible);
     }
   } else if (state.display === 'vectors' && state.speed > 0) {
     const arrowLength = .25 + 1.23*Math.sqrt(state.speed/50);
@@ -449,14 +600,33 @@ function rotate(horizontal, vertical) {
 }
 canvas.addEventListener('pointerdown', event => {
   if (event.button !== 0 || drag) return;
-  drag = {id:event.pointerId,x:event.clientX,y:event.clientY};
+  drag = {id:event.pointerId,x:event.clientX,y:event.clientY,moved:false};
   canvas.setPointerCapture(event.pointerId);
 });
 canvas.addEventListener('pointermove', event => {
   if (drag?.id !== event.pointerId) return;
-  rotate((event.clientX-drag.x)*.009,(event.clientY-drag.y)*.009);
+  const dx = event.clientX-drag.x;
+  const dy = event.clientY-drag.y;
+  if (!drag.moved && Math.hypot(dx,dy)<4) return;
+  drag.moved = true;
+  rotate(dx*.009,dy*.009);
   drag.x = event.clientX;
   drag.y = event.clientY;
+});
+canvas.addEventListener('pointerup', event => {
+  if (drag?.id !== event.pointerId || drag.moved || !wave.enabled || state.display !== 'rows') return;
+  const rect = canvas.getBoundingClientRect();
+  const x = event.clientX-rect.left;
+  const y = event.clientY-rect.top;
+  let closest = Infinity;
+  for (const {point,radius,row,index} of hitTargets) {
+    const distance = Math.hypot(point[0]-x,point[1]-y);
+    if (distance <= radius+4 && distance <= closest) {
+      trackedBall = {row,index};
+      closest = distance;
+    }
+  }
+  draw();
 });
 canvas.addEventListener('lostpointercapture', event => {
   if (drag?.id === event.pointerId) drag = null;
@@ -480,14 +650,13 @@ document.getElementById('reset-view').addEventListener('click', () => {
 function animate(now) {
   const dt = previousTime === undefined ? 0 : Math.min((now-previousTime)/1000,.05);
   previousTime = now;
-  if (state.speed > 0) {
-    ballPhase = (ballPhase+state.speed*dt*.13)%ballSpacing;
-    draw();
-  }
+  wave.time += dt*timeScale;
+  if (state.speed > 0 || wave.enabled) draw();
   animation = requestAnimationFrame(animate);
 }
 function applyPlayback() {
   play.disabled = state.display !== 'rows';
+  step.disabled = play.disabled;
   play.textContent = state.running && !play.disabled ? '暂停' : '播放';
   cancelAnimationFrame(animation);
   previousTime = undefined;
@@ -498,6 +667,49 @@ play.addEventListener('click', () => {
   applyPlayback();
 });
 
+document.getElementById('reset-time').addEventListener('click', () => {
+  wave.time = 0;
+  trackedBall = {row:middleRow,index:0};
+  state.running = false;
+  applyPlayback();
+  draw();
+});
+step.addEventListener('click', () => {
+  state.running = false;
+  wave.time += 2;
+  applyPlayback();
+  draw();
+});
+waveEnabled.addEventListener('change', () => {
+  wave.enabled = waveEnabled.checked;
+  document.getElementById('wave-details').hidden = !wave.enabled;
+  wave.time = 0;
+  trackedBall = {row:middleRow,index:0};
+  if (wave.enabled) {
+    state.running = false;
+    document.getElementById('show-rows').checked = true;
+    setDisplayMode('rows');
+  } else {
+    setDisplayMode(state.display);
+  }
+});
+reference.addEventListener('change', () => {
+  wave.reference = reference.value;
+  draw();
+});
+for (const [id,key,unitLabel] of [['amplitude','amplitude','m'],['wavelength','wavelength','m'],['phase-speed','phaseSpeed','m/s']]) {
+  const input = document.getElementById(id);
+  const output = document.getElementById(id+'-value');
+  function update() {
+    wave[key] = +input.value;
+    output.value = input.value+' '+unitLabel;
+    draw();
+  }
+  input.addEventListener('input',update);
+  update();
+}
+waveEnabled.checked = false;
+reference.value = 'ground';
 setTheme('light');
 updateFlow();
 setDisplayMode(modeInputs.find(input => input.checked).value);
