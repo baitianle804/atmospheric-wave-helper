@@ -65,6 +65,7 @@ canvas:active {cursor:grabbing}
 .wave-start .btn {width:100%;margin-top:7px}
 .wave-start output {display:block;color:var(--muted);font-size:13px;margin-top:4px}
 .wave-start progress {display:block;width:100%;height:8px;accent-color:var(--accent);margin-top:7px}
+.wave-start progress[hidden] {display:none}
 .reference-select {display:block;width:100%;margin-top:4px;padding:6px;border:1px solid var(--line);border-radius:7px;background:var(--page);color:var(--ink);font:inherit;font-size:14px}
 .wave-field {margin-top:10px}
 .wave-field label {font-size:14px}
@@ -177,7 +178,7 @@ input[type=range] {width:100%;margin:0;display:block;cursor:pointer;accent-color
               <output id="wave-strength" aria-live="off">扰动强度 0%</output>
               <progress id="wave-progress" max="1" value="0" aria-label="扰动相对强度"></progress>
               <button type="button" class="btn primary" id="inject-wave">加入扰动</button>
-              <p class="hint">基本场 + 扰动 = 总场。加入时逐渐提高扰动振幅，便于看清叠加过程。</p>
+              <p class="hint" id="injection-hint">基本场 + 扰动 = 总场。加入时逐渐提高扰动振幅，便于看清叠加过程。</p>
             </div>
             <label for="reference">参考系</label>
             <select class="reference-select" id="reference">
@@ -302,10 +303,10 @@ const models = {
     wavelength:['水平波长',250,3200,50,1500,'km'], medium:depthControl, latitude:latitudeControl,
     hint:'调纬度看旋转影响。浅水槽是示意图，自由面高度和横向尺度分别缩放。',
     explanation:'旋转浅水模型。σ² = f² + gHk²，f = 2Ω sinφ。纬度为 0 时退化为重力外波。'},
-  internal: {scale:500, rate:30, step:20, internal:true, amplitude:['垂直位移振幅',3,55,1,30,'m'],
-    wavelength:['水平波长',500,2800,50,1500,'m'], medium:stratification,
-    hint:'侧着看不同高度的起伏。紫菱形追踪中间高度的相位，能量可以向上传播。',
-    explanation:'稳定层结中的非静力平面内波。σ² = N²k²/(k² + m²)。模型的垂直波长为 1200 m。'},
+  internal: {scale:500, rate:85, step:45, internal:true, local:true,
+    amplitude:['中心初始上抬量',5,75,1,50,'m'], medium:stratification,
+    hint:'默认使用随背景流视角。蓝紫色表示上抬，橙色表示下沉，橙色十字标出扰动的初始位置随基流平移后的坐标。',
+    explanation:'稳定层结中的二维线性 Boussinesq 模型。中心一个小区域初始上抬，周围有补偿位移，初始扰动速度为零。净浮力 b′ = −N²ξz 提供回复作用，连续性将上升、下沉和水平辐合辐散联系起来。局地扰动由满足 σ² = N²k²/(k² + m²) 的多个模态演变。上下为刚性边界，远处采用周期边界。'},
   rotInternal: {scale:50000, rate:1500, step:900, internal:true, amplitude:['垂直位移振幅',5,100,5,45,'m'],
     wavelength:['水平波长',40,300,5,150,'km'], medium:stratification, latitude:latitudeControl,
     hint:'改 N 或纬度，比较浮力与科氏力。竖直方向及球的扰动位移做了显示缩放。',
@@ -322,8 +323,8 @@ const models = {
     hint:'俯视球串的南北摆动。改风速和波长，找槽脊东进、静止和西退的条件。',
     explanation:'β 平面上的一维正压 Rossby 波。地面相速 U − β/k²，群速度 U + β/k²。此模型针对课件中的理想化西风带。'}
 };
-const middleRow = 7;
-const wave = {experiment:'base', enabled:false, reference:'ground', time:0, startedAt:null};
+let middleRow = 7;
+const wave = {experiment:'base', enabled:false, reference:'ground', time:0, startedAt:null, sourceGroundX:0};
 const rampPlaybackSeconds = 3;
 const injectWave = document.getElementById('inject-wave');
 const waveStage = document.getElementById('wave-stage');
@@ -370,8 +371,11 @@ function makeRows(direction) {
   const acrossRadius = Math.min(...ballBounds.map((extent,i) => extent/Math.abs(across[i])));
   const upRadius = Math.min(...ballBounds.map((extent,i) => extent/Math.abs(up[i])));
   const result = [];
-  for (const level of [-.64, 0, .64]) {
-    for (const column of [-.73, -.365, 0, .365, .73]) {
+  const local = models[wave.experiment].local;
+  const levels = local ? [-.86,-.62,-.38,-.17,0,.17,.38,.62,.86] : [-.64,0,.64];
+  const columns = local ? [-.63,0,.63] : [-.73,-.365,0,.365,.73];
+  for (const level of levels) {
+    for (const column of columns) {
       const center = across.map((component,i) => component*column*acrossRadius + up[i]*level*upRadius);
       // Keep the grid inside the box when both transverse axes are tilted.
       const fit = Math.max(1,...center.map((position,i) => Math.abs(position)/(.88*ballBounds[i])));
@@ -398,6 +402,7 @@ function updateFlow() {
   velocity = unit.map(value => value*state.speed);
   transverse = [Math.sin(direction)*Math.sin(elevation), Math.cos(direction)*Math.sin(elevation), Math.cos(elevation)];
   rows = makeRows(direction);
+  middleRow = Math.floor(rows.length/2);
   wave.time = 0;
   wave.startedAt = null;
   trackedBall = {row:middleRow,index:0};
@@ -486,9 +491,9 @@ function updatePhysics() {
     phaseSpeed = sigma/k;
     groupSpeed = gh*k/sigma;
   }
-  if (model.internal) {
+  if (model.internal && !model.local) {
     const n = wave.experiment === 'inertialWave' ? 0 : wave.medium;
-    m = -tau/(wave.experiment === 'internal' ? 1200 : 1800);
+    m = -tau/1800;
     const total = k*k+m*m;
     sigma = Math.hypot(n*k,f*m)/Math.sqrt(total);
     phaseSpeed = sigma/k;
@@ -507,7 +512,78 @@ function updatePhysics() {
   }
   const amplitude = model.surface || wave.experiment === 'inertial' || wave.experiment === 'rossby' || model.internal
     ? wave.amplitude : Math.min(wave.amplitude, wave.experiment === 'sound' ? .1*wave.wavelength : Infinity);
-  physics = {model, f, k, m, sigma, phaseSpeed, groupSpeed, verticalGroup, amplitude};
+  const localModes = model.local ? makeLocalModes(model.scale, wave.medium) : null;
+  physics = {model, f, k, m, sigma, phaseSpeed, groupSpeed, verticalGroup, amplitude, localModes};
+}
+function makeLocalModes(scale, buoyancyFrequency) {
+  const lid = bounds[2]*scale;
+  const period = 5*2*bounds[0]*scale;
+  const xWidth = 220;
+  const zWidth = 150;
+  const modes = [];
+  let centre = 0;
+  for (let i=1;i<=52;i++) {
+    const k = 2*Math.PI*i/period;
+    const gaussian = Math.exp(-.5*(k*xWidth)**2);
+    if (gaussian<.003) break;
+    // Suppress very long waves so the compensating displacement stays near the source.
+    const xWeight = gaussian*(-Math.expm1(-.5*(k*600)**2));
+    const vertical = [];
+    // A symmetric source at z=0 excites odd sine modes between the rigid lids.
+    for (let j=1;j<=11;j+=2) {
+      const m = j*Math.PI/(2*lid);
+      const centreShape = Math.sin(m*lid);
+      const weight = xWeight*centreShape*Math.exp(-.5*(m*zWidth)**2);
+      const frequency = buoyancyFrequency*k/Math.hypot(k,m);
+      vertical.push({m,weight,frequency});
+      centre += weight*centreShape;
+    }
+    modes.push({k,vertical});
+  }
+  return {modes, normalization:centre, lid};
+}
+function localField(elapsed, centreX) {
+  const {model,amplitude,localModes} = physics;
+  const {modes,normalization,lid} = localModes;
+  const frameModes = modes.map(({k,vertical}) => ({
+    k, vertical:vertical.map(({m,weight,frequency}) => ({
+      m, coefficient:weight*Math.cos(frequency*elapsed)
+    }))
+  }));
+  const layers = new Map();
+  const factor = amplitude/(normalization*model.scale);
+  return (x,z) => {
+    let layer = layers.get(z);
+    if (!layer) {
+      const weights = frameModes.map(({k,vertical}) => {
+        let horizontal = 0;
+        let verticalDisplacement = 0;
+        for (const {m,coefficient} of vertical) {
+          const angle = m*(z*model.scale+lid);
+          horizontal -= m/k*coefficient*Math.cos(angle);
+          verticalDisplacement += coefficient*Math.sin(angle);
+        }
+        return {k,horizontal,verticalDisplacement};
+      });
+      layer = {weights,samples:new Map()};
+      layers.set(z,layer);
+    }
+    if (layer.samples.has(x)) return layer.samples.get(x);
+    let dx = 0;
+    let dz = 0;
+    for (const {k,horizontal,verticalDisplacement} of layer.weights) {
+      const phase = k*(x*model.scale-centreX);
+      dx += horizontal*Math.sin(phase);
+      dz += verticalDisplacement*Math.cos(phase);
+    }
+    const displacement = {dx:factor*dx,dz:factor*dz};
+    layer.samples.set(x,displacement);
+    return displacement;
+  };
+}
+function localCenterInView(elapsed) {
+  const frameSpeed = wave.reference==='flow' ? state.speed : 0;
+  return wave.sourceGroundX+state.speed*elapsed-frameSpeed*wave.time;
 }
 function motionInView() {
   const frameSpeed = wave.enabled && wave.reference === 'flow' ? state.speed : 0;
@@ -524,6 +600,7 @@ function packetEnvelope(x, groupDistance) {
 function waveState() {
   if (wave.startedAt===null) return {elapsed:0,gain:0};
   const elapsed = wave.time-wave.startedAt;
+  if (physics.model.local) return {elapsed,gain:1};
   const fraction = clamp(elapsed/(rampPlaybackSeconds*physics.model.rate),0,1);
   return {elapsed,gain:fraction*fraction*(3-2*fraction)};
 }
@@ -532,7 +609,10 @@ function updateWaveStage(gain) {
   const pending = wave.startedAt===null;
   const status = pending ? '基本场' : gain<1 ? '正在加入扰动' : '总场（基本场 + 扰动）';
   if (waveStage.textContent!==status) waveStage.textContent = status;
-  waveStrength.value = '扰动强度 '+Math.round(100*gain)+'%';
+  waveStrength.value = physics.model.local
+    ? (pending?'扰动为零':'中心初始上抬 '+physics.amplitude+' m')
+    : '扰动强度 '+Math.round(100*gain)+'%';
+  waveProgress.hidden = Boolean(physics.model.local);
   waveProgress.value = gain;
   injectWave.disabled = !pending;
 }
@@ -548,10 +628,16 @@ function inertialOffset(elapsed, gain) {
   const radius = initialSpeed/f;
   return {x:radius*(Math.cos(angle)-1),y:-radius*Math.sin(angle),radius};
 }
-function sampleBall(row,distance,crestDistance,groupDistance,inertial,gain) {
+function sampleBall(row,distance,crestDistance,groupDistance,inertial,gain,localSample) {
   const position = rowPosition(row,distance);
   const {model,f,k,m,sigma} = physics;
   if (!gain || model.surface) return {position,compression:0};
+  if (localSample) {
+    const {dx,dz} = localSample(position[0],position[2]);
+    position[0] += dx;
+    position[2] += dz;
+    return {position,compression:0,verticalShift:dz};
+  }
   const amplitude = gain*physics.amplitude;
   const x = distance*model.scale;
   const phase = k*(x-crestDistance);
@@ -570,10 +656,9 @@ function sampleBall(row,distance,crestDistance,groupDistance,inertial,gain) {
       position[0] += inertial.x;
       position[1] += inertial.y;
       break;
-    case 'internal':
     case 'rotInternal':
     case 'inertialWave': {
-      const verticalScale = wave.experiment === 'internal' ? model.scale : 1000;
+      const verticalScale = 1000;
       const theta = phase+m*row.origin[2]*verticalScale;
       const dz = amplitude*Math.cos(theta);
       const dx = -m/k*dz;
@@ -603,6 +688,15 @@ function updateTracking(motion, ballDistance, crestDistance, ballPosition, baseP
   if (!model.surface && !model.internal) ballReading.value += ' · 偏移 '+distance(shift*model.scale);
   const diagnostic = document.getElementById('wave-diagnostic');
   const label = document.getElementById('diagnostic-label');
+  if (model.local) {
+    if (gain) ballReading.value += ' · 垂直位移 '+distance((ballPosition[2]-basePosition[2])*model.scale);
+    crestReading.value = gain?'施加后 '+(wave.time-wave.startedAt).toFixed(0)+' s':'尚未施加';
+    label.textContent = '观察';
+    diagnostic.value = gain
+      ? (wave.reference==='flow'?'相对基流向左右及不同高度扩展':'向外传播，同时被背景风向东平流')
+      : '稳定层结 · 球串保持笔直';
+    return;
+  }
   if (!gain) {
     crestReading.value = '尚无可见扰动';
     label.textContent = '基本场';
@@ -706,6 +800,8 @@ function draw() {
     const crestDistance = motion.crestSpeed*elapsed;
     const groupDistance = motion.groupSpeed*elapsed;
     const balls = [];
+    const localCentre = model.local && gain ? localCenterInView(elapsed) : null;
+    const localSample = localCentre===null ? null : localField(elapsed,localCentre);
     const inertial = wave.experiment==='inertial' && gain>0 ? inertialOffset(elapsed,gain) : null;
     // Large displacements can carry balls into the box from outside its edges.
     const axisExtent = ballBounds.reduce((sum,extent,axis) => sum+extent*Math.abs(unit[axis]),0);
@@ -715,11 +811,11 @@ function draw() {
       const last = Math.floor((axisExtent-advance+shift)/ballSpacing);
       for (let index=first; index<=last; index++) {
         const distance = index*ballSpacing+advance;
-        const {position,compression} = sampleBall(row,distance,crestDistance,groupDistance,inertial,gain);
+        const {position,compression,verticalShift=0} = sampleBall(row,distance,crestDistance,groupDistance,inertial,gain,localSample);
         if (!insideBox(position)) continue;
         const margin = Math.min(...ballBounds.map((extent,axis) => extent-Math.abs(position[axis])));
         const opacity = clamp(margin/.08,0,1);
-        balls.push({point:project(position),opacity,compression,row:rowIndex,index});
+        balls.push({point:project(position),opacity,compression,verticalShift,row:rowIndex,index});
       }
     }
     balls.sort((a,b) => a.point[2]-b.point[2]);
@@ -743,11 +839,16 @@ function draw() {
       }
       ctx.setLineDash([]);
     }
-    for (const {point:[x,y,depth],opacity,compression} of balls) {
+    for (const {point:[x,y,depth],opacity,compression,verticalShift} of balls) {
       ctx.globalAlpha = opacity*(.62+.38*clamp((depth+5.4)/10.8,0,1));
       ctx.beginPath();
       ctx.arc(x,y,radius,0,Math.PI*2);
-      ctx.fillStyle = compression>.60 ? palette.crest : palette.flow;
+      const colourThreshold = .08*physics.amplitude/model.scale;
+      if (localSample && Math.abs(verticalShift)>colourThreshold) {
+        ctx.fillStyle = verticalShift>0 ? palette.crest : palette.ball;
+      } else {
+        ctx.fillStyle = compression>.60 ? palette.crest : palette.flow;
+      }
       ctx.fill();
     }
     if (wave.enabled) {
@@ -755,13 +856,18 @@ function draw() {
       const ballDistance = trackedBall.index*ballSpacing+advance;
       const row = rows[trackedBall.row];
       const basePosition = rowPosition(row,ballDistance);
-      const {position:ballPosition} = sampleBall(row,ballDistance,crestDistance,groupDistance,inertial,gain);
+      const {position:ballPosition} = sampleBall(row,ballDistance,crestDistance,groupDistance,inertial,gain,localSample);
       const axisPosition = crestDistance/model.scale;
-      const crestPosition = model.surface
+      const crestPosition = model.local ? null : model.surface
         ? [axisPosition,0,surfaceHeight(crestDistance,crestDistance,gain)]
         : sampleBall(rows[middleRow],axisPosition,crestDistance,groupDistance,inertial,gain).position;
       const ballVisible = insideBox(ballPosition);
-      const crestVisible = gain>0 && wave.experiment!=='inertial' && insideBox(crestPosition);
+      const crestVisible = gain>0 && wave.experiment!=='inertial' && crestPosition && insideBox(crestPosition);
+      if (localCentre!==null && Math.abs(localCentre/model.scale)<=bounds[0]) {
+        const [x,y] = project([localCentre/model.scale,0,0]);
+        line([x-7,y],[x+7,y],palette.ball,2);
+        line([x,y-7],[x,y+7],palette.ball,2);
+      }
       if (model.surface || (gain>0 && wave.experiment==='packet')) {
         const tracks = model.surface ? [-2.0,-1,0,1,2.0] : [-1,1];
         if (!model.surface) ctx.setLineDash([5,4]);
@@ -954,6 +1060,7 @@ play.addEventListener('click', () => {
 injectWave.addEventListener('click', () => {
   if (!wave.enabled || wave.startedAt!==null) return;
   wave.startedAt = wave.time;
+  wave.sourceGroundX = wave.reference==='flow' ? state.speed*wave.time : 0;
   if (state.display!=='rows') {
     document.getElementById('show-rows').checked = true;
     setDisplayMode('rows');
@@ -1003,10 +1110,15 @@ function selectExperiment() {
   wave.enabled = wave.experiment!=='base';
   resetTime.textContent = wave.enabled?'回到基本场':'回到起点';
   const model = models[wave.experiment];
+  if (model.local) Object.assign(camera,{yaw:0,tilt:0,zoom:1});
+  injectWave.textContent = model.local?'施加中心扰动':'加入扰动';
+  document.getElementById('injection-hint').textContent = model.local
+    ? '从稳定层结开始，只在中心附近施加一次上抬。随后观察扰动自行传播。'
+    : '基本场 + 扰动 = 总场。加入时逐渐提高扰动振幅，便于看清叠加过程。';
   document.getElementById('wave-details').hidden = !wave.enabled;
   document.getElementById('experiment-hint').textContent = model.hint||'';
   document.getElementById('model-explanation').textContent = model.explanation||'';
-  document.getElementById('crest-label').textContent = wave.experiment==='inertial' ? '波峰'
+  document.getElementById('crest-label').textContent = model.local ? '中心扰动' : wave.experiment==='inertial' ? '波峰'
     : wave.experiment==='sound' ? '紫菱形 · 压缩峰' : wave.experiment==='packet' ? '紫菱形 · 载波相位' : '紫菱形 · 被追踪波峰';
   for (const [id,key] of waveControls) {
     const control = model[key];
@@ -1015,7 +1127,7 @@ function selectExperiment() {
     const [label,min,max,stepValue,value] = control;
     const input = document.getElementById(id);
     Object.assign(input,{min,max,step:stepValue,value});
-    if (id==='amplitude') document.getElementById('amplitude-label').textContent = '目标'+label;
+    if (id==='amplitude') document.getElementById('amplitude-label').textContent = model.local ? label : '目标'+label;
     if (id==='medium') document.getElementById('medium-label').textContent = label;
   }
   const fixed = !['base','sine','packet'].includes(wave.experiment);
